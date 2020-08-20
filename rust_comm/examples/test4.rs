@@ -1,9 +1,13 @@
 /////////////////////////////////////////////////////////////
-// rust_comm::test3.rs - Test Tcp Communation Library      //
+// rust_comm::test4.rs - Test Tcp Communation Library      //
 //                                                         //
 // Jim Fawcett, https://JimFawcett.github.io, 19 Jul 2020  //
 /////////////////////////////////////////////////////////////
 /*
+   NOTE:
+   
+   === Work in Progress - not currently functional ===
+
    Demo:
    Test message rate and throughput
    - start Listener component
@@ -148,6 +152,22 @@ fn client_no_wait_for_reply<L: Logger>(
   handle
 }
 
+fn multiple_clients(
+    nc: u8,
+    addr: &'static str,     // endpoint: Ipaddr:Port
+    name: &'static str,     // test name
+    num_msgs:usize,         // number of messages
+    sz_bytes:usize          // message body size
+)
+{
+    let tmr = StopWatch::new();
+    tmr.start();
+    let handles: Vec<Option(JoinHandle)>;
+    for _i in nc {
+        let handle = client_no_wait_for_reply(addr, name, num_msgs, sz_bytes);
+        handles.push(handle);
+    }
+}
 /*---------------------------------------------------------
   Perf testing - runs tests of the day
 */
@@ -155,7 +175,7 @@ fn main() {
 
     type L = MuteLog;
 
-    print!("\n  -- test3: rust_comm --\n");
+    print!("\n  -- test4: rust_comm --\n");
 
     let nt: u8 = 8;
     let addr = "127.0.0.1:8080";

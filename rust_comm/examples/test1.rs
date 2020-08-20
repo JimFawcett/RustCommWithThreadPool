@@ -32,7 +32,7 @@ fn main() {
     print!("\n  -- Demo rust_comm --\n");
     
     let addr = "127.0.0.1:8080";
-    let mut lsnr = Listener::<P,Log>::new();
+    let mut lsnr = Listener::<P,Log>::new(8);
     let rslt = lsnr.start(addr);
     if rslt.is_err() {
         return;
@@ -59,7 +59,7 @@ fn main() {
         let msg = conn.get_message();
         print!("\n  main received msg: {:?}",msg.get_body_str());
 
-        /*-- shut down connertor --*/
+        /*-- shut down connector --*/
         let mut msg = Message::new();
         msg.set_type(MessageType::END);
         print!("\n  main posting {:?} msg", "END");
@@ -67,13 +67,7 @@ fn main() {
     }
 
     /*-- shut down listener --*/
-    let conn = Connector::<P,M,Log>::new(addr).unwrap();
-    let mut msg = Message::new();
-    msg.set_type(MessageType::QUIT);
-    print!("\n  main posting {:?} msg", "QUIT");
-    conn.post_message(msg);
-    let _ = std::io::stdout().flush();
-
+    lsnr.stop();
     let _ = handle.join();
     println!();
 }
