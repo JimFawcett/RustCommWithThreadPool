@@ -4,18 +4,14 @@
 // Jim Fawcett, https://JimFawcett.github.io, 19 Jul 2020  //
 /////////////////////////////////////////////////////////////
 /*
-   NOTE:
-   
-   === Work in Progress - not currently functional ===
-
    Demo:
-   Test message rate and throughput
+   Test message rate and throughput for multiple clients
    - start Listener component
-   - start Connector component
-   - start post_message thread
-   - start recv_message thread
-   - send a fixed number of messages
-   - send END message to exit client handler
+   - start nc Connector components, each on its own thread
+       - start post_message thread
+       - start recv_message thread
+       - send a fixed number of messages
+       - send END message to exit client handler
    - eval elapsed time
    - send QUIT message to shut down Listener
 */
@@ -26,6 +22,7 @@ use std::io::prelude::*;
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 use std::{thread, time};
+use std::thread::{JoinHandle};
 
 /*-- component library rust_blocking_queue --*/
 use rust_message::*;
@@ -86,17 +83,6 @@ fn client_wait_for_reply<L: Logger>(
     });
     handle
 }
-fn display_test_data(et:u128, num_msgs:usize, msg_size:usize) {
-    let elapsed_time_sec = 1.0e-6 * et as f64;
-    let num_msgs_f64 = num_msgs as f64;
-    let size_mb = 1.0e-6*(msg_size + 1) as f64;
-    let msg_rate = num_msgs_f64/elapsed_time_sec;
-    let byte_rate_mbpsec = num_msgs_f64*size_mb/elapsed_time_sec;
-    print!("\n      elapsed microsec {}", et);
-    print!("\n      messages/second  {:.2}", msg_rate);
-    print!("\n      thruput - MB/S   {:.2}", byte_rate_mbpsec);
-}
-
 /*---------------------------------------------------------
   Perf test - client does not wait for reply before posting
 */
@@ -117,10 +103,10 @@ fn client_no_wait_for_reply<L: Logger>(
     let mut msg = Message::new();
     let body: Vec<u8> = vec![0u8;sz_bytes];
     msg.set_body_bytes(body);
-    let mut tmr = StopWatch::new();
+    // let mut tmr = StopWatch::new();
     let _handle = std::thread::spawn(move || {
         /*-- start timer after connect, bld msg & start thread --*/
-        tmr.start();
+        // tmr.start();
         for _i in 0..num_msgs {
             L::write(
                 &format!(
@@ -145,13 +131,28 @@ fn client_no_wait_for_reply<L: Logger>(
             );
         }
         /*-- stop timer after receiving last message --*/
-        let _ = tmr.stop();
-        let et = tmr.elapsed_micros();
-        display_test_data(et, num_msgs, sz_bytes);
+        // let _ = tmr.stop();
+        // let et = tmr.elapsed_micros();
+        // display_test_data(et, num_msgs, sz_bytes);
     });
   handle
 }
-
+/*---------------------------------------------------------
+  Display test data - used for individual tests
+*/
+fn display_test_data(et:u128, num_msgs:usize, msg_size:usize) {
+    let elapsed_time_sec = 1.0e-6 * et as f64;
+    let num_msgs_f64 = num_msgs as f64;
+    let size_mb = 1.0e-6*(msg_size + 1) as f64;
+    let msg_rate = num_msgs_f64/elapsed_time_sec;
+    let byte_rate_mbpsec = num_msgs_f64*size_mb/elapsed_time_sec;
+    print!("\n      elapsed microsec {}", et);
+    print!("\n      messages/second  {:.2}", msg_rate);
+    print!("\n      thruput - MB/S   {:.2}", byte_rate_mbpsec);
+}
+/*---------------------------------------------------------
+  Multiple clients running client_no_wait_for_reply
+*/
 fn multiple_clients(
     nc: u8,
     addr: &'static str,     // endpoint: Ipaddr:Port
@@ -160,13 +161,26 @@ fn multiple_clients(
     sz_bytes:usize          // message body size
 )
 {
-    let tmr = StopWatch::new();
+    print!("\n  number of clients:  {:?}",nc);
+    let mut tmr = StopWatch::new();
     tmr.start();
-    let handles: Vec<Option(JoinHandle)>;
-    for _i in nc {
-        let handle = client_no_wait_for_reply(addr, name, num_msgs, sz_bytes);
-        handles.push(handle);
+    let mut handles = Vec::<Option<JoinHandle<()>>>::new();
+    for _i in 0..nc {
+        let handle = client_no_wait_for_reply::<MuteLog>(addr, name, num_msgs, sz_bytes);
+        handles.push(Some(handle));
     }
+    /*-- wait for all replies --*/
+    for handle in &mut handles {
+        let _ = handle.take().unwrap().join();
+    }
+    tmr.stop();
+    let et = tmr.elapsed_micros();
+    let nm = nc as usize *num_msgs;
+    let tp = (nm * sz_bytes) as u128 / et;
+    // print!("\n  number of clients: {:?}",nc);
+    print!("\n  elapsed microsecs:  {:?}",et);
+    print!("\n  number messages:    {:?}", nm);
+    print!("\n  throughput MB/S:    {:?}", tp)
 }
 /*---------------------------------------------------------
   Perf testing - runs tests of the day
@@ -179,6 +193,7 @@ fn main() {
 
     let nt: u8 = 8;
     let addr = "127.0.0.1:8080";
+    print!("\n  num thrdpool thrds: {:?}",nt);
     let mut lsnr = Listener::<P,Log>::new(nt);
     let rslt = lsnr.start(addr);
     if rslt.is_err() {
@@ -186,56 +201,10 @@ fn main() {
     }
     let _handle = rslt.unwrap();
 
-    let h1 = client_wait_for_reply::<L>(
-        addr, "test3 - wait for reply", 1000, 65536
-    );
-    let _ = h1.join();
-    println!();
-
-    let h2 = client_no_wait_for_reply::<L>(
-        addr, "test3 - no wait for reply", 1000, 65536
-    );
-    let _ = h2.join();
-    println!();
-
-    let h1 = client_wait_for_reply::<L>(
-        addr, "test3 - wait for reply", 1000, 1024
-    );
-    let _ = h1.join();
-    println!();
-
-    let h2 = client_no_wait_for_reply::<L>(
-        addr, "test3 - no wait for reply", 1000, 1024
-    );
-    let _ = h2.join();
-    println!();
-
-    let h1 = client_wait_for_reply::<L>(
-        addr, "test3 - wait for reply", 1000, 0
-    );
-    let _ = h1.join();
-    println!();
-
-    let h2 = client_no_wait_for_reply::<L>(
-        addr, "test3 - no wait for reply", 1000, 0
-    );
-    let _ = h2.join();
+    multiple_clients(16, addr, "test4", 100, 65537);
     println!();
 
     /*-- shut down listener --*/
-    // let conn = Connector::<P,M,Log>::new(addr).unwrap();
-    // let mut msg = Message::new();
-    // msg.set_type(MessageType::QUIT);
-    // L::write(
-    //     &format!("\n  main posting  {:?} msg", "QUIT")
-    // );
-    // let _ = std::io::stdout().flush();
-    // for _i in 0..nt + 2 {
-    //     let conn = Connector::<P,M,Log>::new(addr).unwrap();
-    //     conn.post_message(msg.clone());
-    // }
-    // thread::sleep(time::Duration::from_millis(10000));
-    // let _ = _handle.join();
-    println!();
-    drop(lsnr);
+    lsnr.stop();
+    let _ = _handle.join();
 }
