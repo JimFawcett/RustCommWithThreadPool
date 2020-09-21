@@ -1,6 +1,6 @@
 /////////////////////////////////////////////////////////////
 // rust_comm::test3.rs - Test Tcp Communation Library      //
-//                                                         //
+//   - RustComm_VariableSizeMsg_NoBuff                     //
 // Jim Fawcett, https://JimFawcett.github.io, 19 Jul 2020  //
 /////////////////////////////////////////////////////////////
 /*
@@ -30,11 +30,24 @@ use rust_comm_processing::*;
 use rust_comm_logger::*;
 use rust_comm::*;
 use rust_timer::*;
+use rust_debug::*;
 
 type Log = MuteLog;
 type M = Message;
 type P = CommProcessing<Log>;
 
+// fn flush_out() {
+//     let _ = std::io::stdout().flush();
+// }
+// fn break_here<F>(pred:bool, f:F) where F:Fn() {
+//     if pred {
+//         print!("\n  break: press return to continue");
+//         flush_out();
+//         f();
+//         let mut _buff = String::new();
+//         let _ = std::io::stdin().read_line(&mut _buff);
+//     }
+// }
 /*---------------------------------------------------------
   Perf test - client waits for reply before posting again
 */
@@ -46,13 +59,13 @@ fn client_wait_for_reply<L: Logger>(
 ) -> std::thread::JoinHandle<()> 
 {
     print!(
-        "\n  -- {}: {} msgs, {} bytes per msg ", 
-        name, num_msgs, sz_bytes + 1
+        "\n  -- {}:\n      {} msgs, {} bytes content per msg ", 
+        name, num_msgs, sz_bytes
     );
     let conn = Connector::<P,M,Log>::new(addr).unwrap();
-    let mut msg = Message::new();
-    let body: Vec<u8> = vec![0u8;sz_bytes];
-    msg.set_body_bytes(body);
+    let mut msg = Message::create_msg_bytes_fit(&vec![0;sz_bytes]);
+    msg.set_type(MessageType::FLUSH as u8);
+
     let mut tmr = StopWatch::new();
     let handle = std::thread::spawn(move || {
         /*-- start timer after connect, bld msg & start thread --*/
@@ -75,8 +88,8 @@ fn client_wait_for_reply<L: Logger>(
         }
         let _ = tmr.stop();
         let et = tmr.elapsed_micros();
-        let mut msg = Message::new();
-        msg.set_type(MessageType::END);
+        let mut msg = Message::create_msg_header_only();
+        msg.set_type(MessageType::END as u8);
         conn.post_message(msg);
         display_test_data(et, num_msgs, sz_bytes);
     });
@@ -85,7 +98,7 @@ fn client_wait_for_reply<L: Logger>(
 fn display_test_data(et:u128, num_msgs:usize, msg_size:usize) {
     let elapsed_time_sec = 1.0e-6 * et as f64;
     let num_msgs_f64 = num_msgs as f64;
-    let size_mb = 1.0e-6*(msg_size + 1) as f64;
+    let size_mb = 1.0e-6*(msg_size) as f64;
     let msg_rate = num_msgs_f64/elapsed_time_sec;
     let byte_rate_mbpsec = num_msgs_f64*size_mb/elapsed_time_sec;
     print!("\n      elapsed microsec {}", et);
@@ -101,18 +114,17 @@ fn client_no_wait_for_reply<L: Logger>(
     name: &'static str,     // test name
     num_msgs:usize,         // number of messages
     sz_bytes:usize          // message body size
-) -> std::thread::JoinHandle<()> 
+) -> (std::thread::JoinHandle<()>, std::thread::JoinHandle<()>) 
 {
     print!(
-        "\n  -- {}: {} msgs, {} bytes per msg ", 
-        name, num_msgs, sz_bytes + 1
+        "\n  -- {}:\n      {} msgs, {} bytes content per msg ", 
+        name, num_msgs, sz_bytes
     );
     let conn = Arc::new(Connector::<P,M,Log>::new(addr).unwrap());
     let sconn1 = Arc::clone(&conn);
     let sconn2 = Arc::clone(&conn);
-    let mut msg = Message::new();
-    let body: Vec<u8> = vec![0u8;sz_bytes];
-    msg.set_body_bytes(body);
+    let msg = Message::create_msg_bytes_fit(&vec![0;sz_bytes]);
+
     let mut tmr = StopWatch::new();
     let _handle = std::thread::spawn(move || {
         /*-- start timer after connect, bld msg & start thread --*/
@@ -126,8 +138,8 @@ fn client_no_wait_for_reply<L: Logger>(
             );
             sconn1.post_message(msg.clone());
         }
-        let mut msg = Message::new();
-        msg.set_type(MessageType::END);
+        let mut msg = Message::new(TYPE_SIZE + CONTENT_SIZE);
+        msg.set_type(MessageType::END as u8);
         sconn1.post_message(msg);
     });
     let handle = std::thread::spawn(move || {
@@ -145,7 +157,7 @@ fn client_no_wait_for_reply<L: Logger>(
         let et = tmr.elapsed_micros();
         display_test_data(et, num_msgs, sz_bytes);
     });
-  handle
+  (_handle, handle)
 }
 
 /*---------------------------------------------------------
@@ -153,9 +165,11 @@ fn client_no_wait_for_reply<L: Logger>(
 */
 fn main() {
 
-    type L = MuteLog;
+    print!("\n  -- Demo rust_comm: test3");
+    print!("\n  -- One client");
+    print!("\n  -- VariableMsgSize, Buffered\n");
 
-    print!("\n  -- test3: rust_comm --\n");
+    type L = MuteLog;
 
     let nt: u8 = 8;
     let addr = "127.0.0.1:8080";
@@ -172,10 +186,11 @@ fn main() {
     let _ = h1.join();
     println!();
 
-    let h2 = client_no_wait_for_reply::<L>(
+    let (h2a, h2b) = client_no_wait_for_reply::<L>(
         addr, "test3 - no wait for reply", 1000, 65536
     );
-    let _ = h2.join();
+    let _ = h2a.join();
+    let _ = h2b.join();
     println!();
 
     let h1 = client_wait_for_reply::<L>(
@@ -184,10 +199,11 @@ fn main() {
     let _ = h1.join();
     println!();
 
-    let h2 = client_no_wait_for_reply::<L>(
+    let (h2a, h2b) = client_no_wait_for_reply::<L>(
         addr, "test3 - no wait for reply", 1000, 1024
     );
-    let _ = h2.join();
+    let _ = h2a.join();
+    let _ = h2b.join();
     println!();
 
     let h1 = client_wait_for_reply::<L>(
@@ -196,14 +212,15 @@ fn main() {
     let _ = h1.join();
     println!();
 
-    let h2 = client_no_wait_for_reply::<L>(
+    let (h2a, h2b) = client_no_wait_for_reply::<L>(
         addr, "test3 - no wait for reply", 1000, 0
     );
-    let _ = h2.join();
-    println!();
+    let _ = h2a.join();
+    let _ = h2b.join();
 
+    println!();
+    
     /*-- shut down listener --*/
     lsnr.stop();
     let _ = _handle.join();
-    // drop(lsnr);
 }

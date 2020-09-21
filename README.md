@@ -1,7 +1,4 @@
 # RustComm
-
-Note: This content will soon be replaced with one of the crates from RustCommExperiments repository
-
 Prototype for message-passing communication system
 Provides:
 - Connector&lt;P,M,L&gt;

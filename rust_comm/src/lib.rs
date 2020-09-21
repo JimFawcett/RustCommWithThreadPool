@@ -1,9 +1,11 @@
 /////////////////////////////////////////////////////////////
 // rust_comm::lib.rs - Tcp Communation Library             //
-//                                                         //
+//   - RustComm_VariableSizeMsg                            //
 // Jim Fawcett, https://JimFawcett.github.io, 19 Jul 2020  //
 /////////////////////////////////////////////////////////////
 /*
+   Variable msg size, buffered transfer
+
    Defined Types:
    - Listener<P,L>
    - Connector<P,M,L>
@@ -46,7 +48,7 @@ type P = CommProcessing<L>;
 */
 #[derive(Debug)]
 pub struct Connector<P,M,L> where 
-    M: Msg + Debug + Clone + Send + Default,
+    M: Msg + Clone + Send + Default,
     P: Debug + Copy + Clone + Send + Sync + Default + Sndr<M> + Rcvr<M>, 
     L: Logger + Debug + Copy + Clone + Default
 {
@@ -55,9 +57,10 @@ pub struct Connector<P,M,L> where
      _p: P,
      connected: bool,
      log: L,
+    //  msg_size: usize,
 }
 impl<P,M,L> Connector<P,M,L> where
-    M: Msg + Debug + Clone + Send + Default + 'static,
+    M: Msg + Clone + Send + Default + 'static,
     P: Debug + Copy + Clone + Send + Sync + Default + Sndr<M> + Rcvr<M>,
     L: Logger + Debug + Copy + Clone + Default
 {    
@@ -73,12 +76,9 @@ impl<P,M,L> Connector<P,M,L> where
     pub fn has_msg(&self) -> bool {
         self.rcv_queue.len() > 0
     }
-    // pub fn shut_down(&self) {
-    //     self.shutdown = true;
-    // }
     pub fn new(addr: &'static str) -> std::io::Result<Connector<P,M,L>>
     where
-        M: Msg + Debug + Clone + Send + Default + 'static,
+        M: Msg + Clone + Send + Default + 'static,
         P: Debug + Copy + Clone + Send + Sync + Default + Sndr<M> + Rcvr<M>,
         L: Logger + Copy + Clone + Default
     {
@@ -94,7 +94,7 @@ impl<P,M,L> Connector<P,M,L> where
         }
         let stream = rslt.unwrap();
         let mut buf_writer = BufWriter::new(stream.try_clone()?);
-        let mut buf_reader = BufReader::new(stream);
+        let mut buf_reader = BufReader::new(stream.try_clone()?);
         
         let send_queue = Arc::new(BlockingQueue::<M>::new());
         let recv_queue = Arc::new(BlockingQueue::<M>::new());
@@ -102,17 +102,21 @@ impl<P,M,L> Connector<P,M,L> where
         /*-- send thread reads input queue and sends msg --*/
         let sqm = Arc::clone(&send_queue);
         let _ = std::thread::spawn(move || {
+            let ssq = Arc::clone(&sqm);
             loop {
-                let ssq = Arc::clone(&sqm);
-                // L::write("\n  -- dequing send msg --");
+                L::write("\n  -- dequing send msg --");
                 let msg = ssq.de_q();
-                // L::write("\n  sending msg");
+                L::write("\n  sending msg");
                 let msg_type = msg.get_type();
-                let rslt = P::buf_send_message(msg, &mut buf_writer);
+                let rslt = P::buf_send_message(&msg, &mut buf_writer);
                 if rslt.is_err() {
+                    // may cause panic if io doesn't complete before 
+                    // thread shuts down
+                    // print!("\n  msg send error");
                     break;
                 }
-                if msg_type == MessageType::END {
+                L::write("\n  -- send successful --");
+                if msg_type == MessageType::END as u8 {
                     L::write("\n--terminating connector send thread--");
                     break;
                 }
@@ -121,13 +125,17 @@ impl<P,M,L> Connector<P,M,L> where
         /*-- recv thread recvs msg (may block) and enQs for user --*/
         let rqm = Arc::clone(&recv_queue);
         let _ = std::thread::spawn(move || {
+            let srq = Arc::clone(&rqm);
             loop {
-                let srq = Arc::clone(&rqm);
-                let rslt = P::buf_recv_message(&mut buf_reader, &srq);
+                L::write("\n  attempting to receive msg in connector");
+                let rslt = P::buf_recv_message(&mut buf_reader);
                 if rslt.is_err() {
                     L::write("\n--terminating connector receive thread--");
                     break;
                 }
+                let msg = rslt.unwrap();
+                srq.en_q(msg);
+                L::write(&format!("\n  recv_queue len: {}", srq.len()));
             }
         });
         /*-- return new Connector as std::io::Result --*/
@@ -138,6 +146,7 @@ impl<P,M,L> Connector<P,M,L> where
             rcv_queue: recv_queue,
             connected: _is_connected,
             log: L::default(),
+            // msg_size: msg_size,
         };
         Ok(me)
     }
@@ -151,11 +160,15 @@ pub fn thread_proc(bq: &BlockingQueue<TcpStream>, run: &Arc<AtomicBool>) {
     loop {
         if !run.load(Ordering::Relaxed) {
             print!("\n  terminating listener thread");
-            let _ = std::io::stdout().flush();
+            // let _ = std::io::stdout().flush();
             break;
         }
         let strm = bq.de_q();
-        handle_client(strm);
+        let rslt = handle_client(strm);
+        if rslt.is_err() {
+            print!("\n  stream failure in handle_client");
+            break;  // this kills one threadpool thread
+        }
     }
 }
 /*---------------------------------------------------------
@@ -164,41 +177,37 @@ pub fn thread_proc(bq: &BlockingQueue<TcpStream>, run: &Arc<AtomicBool>) {
   - process using reply_msg = P::process_message(msg)
   - send back reply_msg
 */
-pub fn handle_client(strm: TcpStream) {
+pub fn handle_client(strm: TcpStream) -> Result<()> {
 
     /*-- thread handles client until receiving an END or QUIT message --*/
-    let mut buf_writer = BufWriter::new(strm.try_clone().unwrap());
-    let mut buf_reader = BufReader::new(strm.try_clone().unwrap());
-    let _ = std::thread::spawn(move || {
-        let rcv_queue = BlockingQueue::<M>::new();
-        loop {
-            let rslt = P::buf_recv_message(&mut buf_reader, &rcv_queue);
-            if rslt.is_err() {
-                print!("\n  socket session closed abruptly");
-                break;
-            }
-            let msg = rcv_queue.de_q();
-            if msg.get_type() == MessageType::END {
-                L::write("\n--listener received END message--");
-                L::write("\n--terminating client handler loop--");           
-                break;
-            }
-            else if msg.get_type() == MessageType::QUIT {
-                L::write("\n--listener received QUIT message--");
-                L::write("\n--terminating client handler loop--");
-                break;
-            }
-            /*-- used to test error handling --*/
-            else if msg.get_type() == MessageType::SHUTDOWN {
-                let _ = strm.shutdown(Shutdown::Both);
-                print!("\n  shutting down socket session");
-                break;
-            }
-            let msg = P::process_message(msg);
-            let _ = P::buf_send_message(msg, &mut buf_writer);
-        } 
-        L::write("\n  terminating handler thread");
-    });
+    let mut buf_writer = BufWriter::new(strm.try_clone()?);
+    let mut buf_reader = BufReader::new(strm.try_clone()?);
+    loop {
+        L::write("\n  attempting to recv message in client handler");
+        // let _ = std::io::stdout().flush();
+        let rslt:Result<Message> = P::buf_recv_message(&mut buf_reader);
+        L::write("\n  receive successful in client handler");
+        if rslt.is_err() {
+            print!("\n  socket session closed abruptly");
+            // let _ = std::io::stdout().flush();
+            break;
+        }
+        let mut msg = rslt.unwrap();
+        if msg.get_type() == MessageType::END as u8 {
+            L::write("\n--listener received END message--");
+            L::write("\n--terminating client handler loop--");           
+            break;
+        }
+        else if msg.get_type() == MessageType::QUIT as u8 {
+            L::write("\n--listener received QUIT message--");
+            L::write("\n--terminating client handler loop--");
+            break;
+        }
+        P::process_message(&mut msg);
+        let _ = P::buf_send_message(&msg, &mut buf_writer);
+    } 
+    L::write("\n  terminating handler thread");
+    Ok(())
 }
 /*---------------------------------------------------------
   Listener<P,L> 
@@ -216,6 +225,7 @@ L: Logger + Debug + Copy + Clone + Default
     log: L, 
     num_thrds: u8,
     addr: &'static str,
+    // msg_size: usize,
     /*-- ThreadPool instance is aggregated in self.start() --*/
 }
 impl<P,L> Listener<P,L> 
@@ -230,6 +240,7 @@ where
               log: L::default(),
               num_thrds: nt,
               addr: "",
+            //   msg_size: 64,
         }
     }
     /*-- starts thread wrapping incoming loop which often blocks --*/
@@ -244,7 +255,6 @@ where
         }
         let tcpl = rslt.unwrap();
         let nt = self.num_thrds;
-        // let run_ref = self.run.clone();
         let run_ref = Arc::clone(&self.run);
 
         /*-- this outer thread prevents appl from blocking waiting for connections --*/
@@ -270,8 +280,8 @@ where
     pub fn stop(&mut self) {
         self.run.store(false, Ordering::Relaxed);
         let conn = Connector::<P,M,L>::new(self.addr).unwrap();
-        let mut msg = Message::new();
-        msg.set_type(MessageType::QUIT);
+        let mut msg = Message::new(TYPE_SIZE + CONTENT_SIZE + 1);
+        msg.set_type(MessageType::QUIT as u8);
         conn.post_message(msg);
     }
 }

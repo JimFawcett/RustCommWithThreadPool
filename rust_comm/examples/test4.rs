@@ -1,9 +1,13 @@
 /////////////////////////////////////////////////////////////
-// rust_comm::test4.rs - Test Tcp Communation Library      //
-//                                                         //
+// rust_comm::test4.rs - Test Tcp Communication Library    //
+//   - RustComm_VariableSizeMsg_NoBuff                     //
 // Jim Fawcett, https://JimFawcett.github.io, 19 Jul 2020  //
 /////////////////////////////////////////////////////////////
 /*
+   Fixed size msg: buffered, fixed size msgs
+
+   NOTE!  message size is defined in Message crate
+ 
    Demo:
    Test message rate and throughput for multiple clients
    - start Listener component
@@ -48,12 +52,11 @@ fn client_wait_for_reply<L: Logger>(
 {
     print!(
         "\n  -- {}: {} msgs, {} bytes per msg ", 
-        name, num_msgs, sz_bytes + 1
+        name, num_msgs, sz_bytes
     );
     let conn = Connector::<P,M,Log>::new(addr).unwrap();
-    let mut msg = Message::new();
-    let body: Vec<u8> = vec![0u8;sz_bytes];
-    msg.set_body_bytes(body);
+    let mut msg = Message::create_msg_bytes_fit(&vec![0;sz_bytes]);
+    msg.set_type(MessageType::FLUSH as u8);
     let mut tmr = StopWatch::new();
     let handle = std::thread::spawn(move || {
         /*-- start timer after connect, bld msg & start thread --*/
@@ -66,20 +69,23 @@ fn client_wait_for_reply<L: Logger>(
                 )
             );
             conn.post_message(msg.clone());
-            let msg = conn.get_message();
+            let _msg = conn.get_message();
             L::write(
                 &format!(
                     "\n  received msg: {:?}", 
-                    &msg.type_display()
+                    &_msg.type_display()
                 )
             );
         }
         let _ = tmr.stop();
         let et = tmr.elapsed_micros();
-        let mut msg = Message::new();
-        msg.set_type(MessageType::END);
+        let content_size = 32;
+        let mut msg = Message::new(HEADER_SIZE + content_size);
+        msg.set_type(MessageType::END as u8);
+        msg.set_content_size(content_size);
         conn.post_message(msg);
         display_test_data(et, num_msgs, sz_bytes);
+        let _ = std::io::stdout().flush();
     });
     handle
 }
@@ -91,22 +97,17 @@ fn client_no_wait_for_reply<L: Logger>(
     name: &'static str,     // test name
     num_msgs:usize,         // number of messages
     sz_bytes:usize          // message body size
-) -> std::thread::JoinHandle<()> 
+) -> (std::thread::JoinHandle<()>, std::thread::JoinHandle<()>) 
 {
     print!(
-        "\n  -- {}: {} msgs, {} bytes per msg ", 
-        name, num_msgs, sz_bytes + 1
+        "\n  -- {}: {} msgs, {} content bytes per msg ", 
+        name, num_msgs, sz_bytes
     );
     let conn = Arc::new(Connector::<P,M,Log>::new(addr).unwrap());
     let sconn1 = Arc::clone(&conn);
     let sconn2 = Arc::clone(&conn);
-    let mut msg = Message::new();
-    let body: Vec<u8> = vec![0u8;sz_bytes];
-    msg.set_body_bytes(body);
-    // let mut tmr = StopWatch::new();
-    let _handle = std::thread::spawn(move || {
-        /*-- start timer after connect, bld msg & start thread --*/
-        // tmr.start();
+    let msg = Message::create_msg_bytes_fit(&vec![0;sz_bytes]);
+    let _handle = std::thread::Builder::new().name("first".to_string()).spawn(move || {
         for _i in 0..num_msgs {
             L::write(
                 &format!(
@@ -116,11 +117,13 @@ fn client_no_wait_for_reply<L: Logger>(
             );
             sconn1.post_message(msg.clone());
         }
-        let mut msg = Message::new();
-        msg.set_type(MessageType::END);
+        let content_size = 32;
+        let mut msg = Message::new(HEADER_SIZE + content_size);
+        msg.set_type(MessageType::END as u8);
+        msg.set_content_size(content_size);
         sconn1.post_message(msg);
     });
-    let handle = std::thread::spawn(move || {
+    let handle = std::thread::Builder::new().name("second".to_string()).spawn(move || {
         for _i in 0..num_msgs {
             let msg = sconn2.get_message();
             L::write(
@@ -130,12 +133,8 @@ fn client_no_wait_for_reply<L: Logger>(
                 )
             );
         }
-        /*-- stop timer after receiving last message --*/
-        // let _ = tmr.stop();
-        // let et = tmr.elapsed_micros();
-        // display_test_data(et, num_msgs, sz_bytes);
     });
-  handle
+  (_handle.unwrap(), handle.unwrap())
 }
 /*---------------------------------------------------------
   Display test data - used for individual tests
@@ -143,12 +142,13 @@ fn client_no_wait_for_reply<L: Logger>(
 fn display_test_data(et:u128, num_msgs:usize, msg_size:usize) {
     let elapsed_time_sec = 1.0e-6 * et as f64;
     let num_msgs_f64 = num_msgs as f64;
-    let size_mb = 1.0e-6*(msg_size + 1) as f64;
+    let size_mb = 1.0e-6*(msg_size) as f64;
     let msg_rate = num_msgs_f64/elapsed_time_sec;
     let byte_rate_mbpsec = num_msgs_f64*size_mb/elapsed_time_sec;
     print!("\n      elapsed microsec {}", et);
     print!("\n      messages/second  {:.2}", msg_rate);
     print!("\n      thruput - MB/S   {:.2}", byte_rate_mbpsec);
+    let _ = std::io::stdout().flush();
 }
 /*---------------------------------------------------------
   Multiple clients running client_no_wait_for_reply
@@ -166,18 +166,22 @@ fn multiple_clients(
     tmr.start();
     let mut handles = Vec::<Option<JoinHandle<()>>>::new();
     for _i in 0..nc {
-        let handle = client_no_wait_for_reply::<MuteLog>(addr, name, num_msgs, sz_bytes);
-        handles.push(Some(handle));
+        let (h2a, h2b) = client_no_wait_for_reply::<MuteLog>(addr, name, num_msgs, 4096);
+        handles.push(Some(h2a));
+        handles.push(Some(h2b));
     }
     /*-- wait for all replies --*/
     for handle in &mut handles {
         let _ = handle.take().unwrap().join();
     }
     tmr.stop();
-    let et = tmr.elapsed_micros();
+    /*-----------------------------------------------------
+      Note: scaling microseconds to seconds cancels 
+            scaling bytes to Megabytes
+    */
+    let et = tmr.elapsed_micros();  // divided by 10e6 to get sec
     let nm = nc as usize *num_msgs;
-    let tp = (nm * sz_bytes) as u128 / et;
-    // print!("\n  number of clients: {:?}",nc);
+    let tp = (nm * sz_bytes) as u128 / et; // divided by 10e6 to get MB
     print!("\n  elapsed microsecs:  {:?}",et);
     print!("\n  number messages:    {:?}", nm);
     print!("\n  throughput MB/S:    {:?}", tp)
@@ -185,12 +189,13 @@ fn multiple_clients(
 /*---------------------------------------------------------
   Perf testing - runs tests of the day
 */
+
 fn main() {
 
+    print!("\n  -- Demo rust_comm: test3\n  -- VariableMsgSize, Buffered\n");
+
     type L = MuteLog;
-
-    print!("\n  -- test4: rust_comm --\n");
-
+    
     let nt: u8 = 8;
     let addr = "127.0.0.1:8080";
     print!("\n  num thrdpool thrds: {:?}",nt);
@@ -201,7 +206,7 @@ fn main() {
     }
     let _handle = rslt.unwrap();
 
-    multiple_clients(16, addr, "test4", 100, 65537);
+    multiple_clients(16, addr, "test4", 1000, 4096);
     println!();
 
     /*-- shut down listener --*/
