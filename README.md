@@ -1,6 +1,6 @@
 # RustCommWithThreadPool
 
-https://JimFawcett.github.io/RustCommWithThreadPool.html
+<a href="https://JimFawcett.github.io/RustCommWithThreadPool.html">Documentation</a>
 
 ### Concept:  
 RustCommWithThreadPool is a facility for sending messages between a Sender and Receiver using std::net::TcpStream and std::net::TcpListener types.  
